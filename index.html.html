@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XML / HTML / JSON Formatter</title>
+<style>
+  body{font-family:Arial,sans-serif;margin:0;background:#f3f5f9;color:#1d2330}
+  main{max-width:1000px;margin:0 auto;padding:20px 16px}
+  h1{font-size:1.4rem;margin:0 0 4px}
+  .sub{color:#667;margin:0 0 14px;font-size:.9rem}
+  .card{background:#fff;border:1px solid #d9dde6;border-radius:10px;padding:12px;margin-bottom:14px}
+  textarea{width:100%;box-sizing:border-box;height:160px;font:13px/1.4 Consolas,monospace;border:1px solid #ccd;border-radius:8px;padding:8px}
+  .radios label{margin-right:18px;font-weight:bold;cursor:pointer}
+  .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+  button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:.9rem}
+  button.alt{background:#fff;color:#1d2330;border:1px solid #ccd}
+  select{padding:6px;border-radius:6px;border:1px solid #ccd}
+  #msg{font-size:.85rem;color:#667}
+  #msg.err{color:#b91c1c}
+  pre{margin:0;font:13px/1.5 Consolas,monospace;white-space:pre;overflow:auto;max-height:600px}
+</style>
+</head>
+<body>
+<main>
+<h1>XML / HTML / JSON Formatter</h1>
+<p class="sub">1) Select the format &nbsp; 2) Paste your code &nbsp; 3) Get the formatted result (vertical, indented)</p>
+
+<div class="card">
+  <div class="radios">
+    <label><input type="radio" name="fmt" value="xml" checked> XML</label>
+    <label><input type="radio" name="fmt" value="html"> HTML</label>
+    <label><input type="radio" name="fmt" value="json"> JSON</label>
+    &nbsp; Indent:
+    <select id="indent"><option value="2">2 spaces</option><option value="4">4 spaces</option></select>
+  </div>
+  <div class="row"><textarea id="input" spellcheck="false" placeholder="Paste your XML / HTML / JSON here..."></textarea></div>
+  <div class="row">
+    <button id="btnFormat">Format</button>
+    <button class="alt" id="btnCopy">Copy result</button>
+    <button class="alt" id="btnDownload">Download result</button>
+    <button class="alt" id="btnClear">Clear</button>
+    <span id="msg"></span>
+  </div>
+</div>
+
+<div class="card"><pre id="output"></pre></div>
+</main>
+
+<script>
+var inputEl = document.getElementById('input');
+var outputEl = document.getElementById('output');
+var msgEl = document.getElementById('msg');
+var result = '';
+
+function getFormat() { return document.querySelector('input[name="fmt"]:checked').value; }
+function getIndent() { return ' '.repeat(parseInt(document.getElementById('indent').value, 10)); }
+
+// removes wrapper quotes and \" that appear when copying from some tools
+function clean(raw) {
+  var t = raw.trim().replace(/\\"/g, '"');
+  while (t.length > 1 && t[0] === '"' && t[t.length - 1] === '"') t = t.slice(1, -1).trim();
+  return t;
+}
+
+/* ---------------- XML ---------------- */
+function buildXml(node, depth, lines, IND) {
+  var pad = IND.repeat(depth);
+  if (node.nodeType === 3) { var v = node.nodeValue.trim(); if (v) lines.push(pad + v); return; }
+  if (node.nodeType === 8) { lines.push(pad + '<!--' + node.nodeValue + '-->'); return; }
+  if (node.nodeType === 4) { lines.push(pad + '<![CDATA[' + node.nodeValue + ']]>'); return; }
+  if (node.nodeType !== 1) return;
+  var attrs = '';
+  for (var i = 0; i < node.attributes.length; i++)
+    attrs += ' ' + node.attributes[i].name + '="' + node.attributes[i].value.replace(/&/g,'&amp;').replace(/"/g,'&quot;') + '"';
+  var kids = Array.from(node.childNodes).filter(function (c) {
+    return c.nodeType === 1 || c.nodeType === 8 || c.nodeType === 4 || (c.nodeType === 3 && c.nodeValue.trim());
+  });
+  var n = node.nodeName;
+  if (!kids.length) lines.push(pad + '<' + n + attrs + '/>');
+  else if (kids.length === 1 && kids[0].nodeType === 3)
+    lines.push(pad + '<' + n + attrs + '>' + kids[0].nodeValue.trim().replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</' + n + '>');
+  else {
+    lines.push(pad + '<' + n + attrs + '>');
+    kids.forEach(function (c) { buildXml(c, depth + 1, lines, IND); });
+    lines.push(pad + '</' + n + '>');
+  }
+}
+function formatXml(src, IND) {
+  var doc = new DOMParser().parseFromString(clean(src), 'application/xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('Invalid XML - check for missing or unclosed tags.');
+  var lines = [];
+  buildXml(doc.documentElement, 0, lines, IND);
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + lines.join('\n');
+}
+
+/* ---------------- JSON ---------------- */
+function formatJson(src, IND) {
+  var t = src.trim(), data;
+  try { data = JSON.parse(t); }
+  catch (e) { data = JSON.parse(clean(src)); }
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) {} } // double-encoded JSON
+  return JSON.stringify(data, null, IND.length);
+}
+
+/* ---------------- HTML ---------------- */
+function formatHtml(src, IND) {
+  var VOID = /^(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/i;
+  var RAW  = /^(script|style|pre|textarea)$/i;
+  var tokens = src.trim().split(/(<!--[\s\S]*?-->|<[^>]+>)/).filter(function (t) { return t.trim() !== ''; });
+  var out = [], d = 0, raw = null;
+
+  function pad() { return IND.repeat(d); }
+
+  tokens.forEach(function (tok) {
+    var m;
+    if (raw) {
+      if (new RegExp('^</' + raw.name + '\\s*>', 'i').test(tok)) {
+        var body = raw.buf;
+        if (body.trim()) {
+          if (/^(pre|textarea)$/i.test(raw.name)) out[out.length - 1].txt += body + tok;
+          else {
+            d++;
+            body.trim().split('\n').forEach(function (l) { if (l.trim()) out.push({ txt: pad() + l.trim(), kind: 'done' }); });
+            d--;
+            out.push({ txt: pad() + tok, kind: 'done' });
+          }
+        } else out[out.length - 1].txt += tok;
+        out[out.length - 1].kind = 'done';
+        raw = null; d--;
+      } else raw.buf += tok;
+      return;
+    }
+    if (/^<!--/.test(tok) || /^<!/.test(tok) || /^<\?/.test(tok)) {
+      out.push({ txt: pad() + tok.trim(), kind: 'done' });
+    } else if ((m = tok.match(/^<\/\s*([\w:-]+)/))) {
+      var name = m[1].toLowerCase();
+      var last = out[out.length - 1], prev = out[out.length - 2];
+      if (last && last.kind === 'text' && prev && prev.kind === 'open' && prev.name === name) {
+        prev.txt += last.txt.trim() + tok; prev.kind = 'done'; out.pop();      // <a>text</a> on one line
+      } else if (last && last.kind === 'open' && last.name === name) {
+        last.txt += tok; last.kind = 'done';                                    // <div></div>
+      } else { d = Math.max(0, d - 1); out.push({ txt: pad() + tok, kind: 'done' }); return; }
+      d = Math.max(0, d - 1);
+    } else if ((m = tok.match(/^<\s*([\w:-]+)/))) {
+      var nm = m[1].toLowerCase();
+      var selfClose = /\/>$/.test(tok) || VOID.test(nm);
+      if (selfClose) out.push({ txt: pad() + tok, kind: 'done' });
+      else {
+        out.push({ txt: pad() + tok, kind: RAW.test(nm) ? 'rawopen' : 'open', name: nm });
+        d++;
+        if (RAW.test(nm)) raw = { name: nm, buf: '' };
+      }
+    } else {
+      out.push({ txt: pad() + tok.replace(/\s+/g, ' ').trim(), kind: 'text' });
+    }
+  });
+  return out.map(function (o) { return o.txt; }).join('\n');
+}
+
+/* ---------------- main ---------------- */
+function run() {
+  msgEl.className = ''; msgEl.textContent = '';
+  var src = inputEl.value;
+  if (!src.trim()) { outputEl.textContent = ''; result = ''; return; }
+  try {
+    var f = getFormat(), IND = getIndent();
+    result = f === 'xml' ? formatXml(src, IND) : f === 'json' ? formatJson(src, IND) : formatHtml(src, IND);
+    outputEl.textContent = result;
+    msgEl.textContent = 'Formatted as ' + f.toUpperCase() + ' - ' + result.split('\n').length + ' lines';
+  } catch (e) {
+    msgEl.className = 'err';
+    msgEl.textContent = (getFormat() === 'json' ? 'Invalid JSON: ' : '') + e.message;
+  }
+}
+
+inputEl.addEventListener('paste', function () { setTimeout(run, 0); });
+inputEl.addEventListener('input', run);
+document.querySelectorAll('input[name="fmt"]').forEach(function (r) { r.addEventListener('change', run); });
+document.getElementById('indent').addEventListener('change', run);
+document.getElementById('btnFormat').onclick = run;
+document.getElementById('btnClear').onclick = function () { inputEl.value = ''; run(); };
+
+document.getElementById('btnCopy').onclick = function () {
+  if (!result) return;
+  function ok() { msgEl.className = ''; msgEl.textContent = 'Copied!'; }
+  function fallback() {
+    var t = document.createElement('textarea'); t.value = result; document.body.appendChild(t); t.select();
+    try { document.execCommand('copy'); ok(); } catch (e) {}
+    document.body.removeChild(t);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(result).then(ok, fallback);
+  else fallback();
+};
+
+document.getElementById('btnDownload').onclick = function () {
+  if (!result) return;
+  var f = getFormat();
+  var mime = { xml: 'application/xml', html: 'text/html', json: 'application/json' }[f];
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([result], { type: mime }));
+  a.download = 'formatted.' + f;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+};
+</script>
+</body>
+</html>
